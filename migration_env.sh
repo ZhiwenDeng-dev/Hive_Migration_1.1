@@ -26,9 +26,9 @@ export verifyStartPartition=
 export verifyEndPartition=2451620
 
 # [migrateTableData config]
-export sourceDistcpHiveRPCAddress=hdfs://ns-fed/
+export sourceDistcpHiveRPCAddress=hdfs://ns-fed
 export sourceHiveHdfsPath=/user/hive/warehouse
-export targetDistcpHiveRPCAddress=hdfs://ns-fed/
+export targetDistcpHiveRPCAddress=hdfs://ns-fed
 export targetHiveHdfsPath=/tmp/hivemig
 export distcpMaps=
 export distcpBandwidth=

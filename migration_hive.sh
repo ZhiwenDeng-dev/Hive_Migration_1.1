@@ -69,9 +69,10 @@ case $mode in
     ;;
     "migrateTableData" | "migrate")
         info "[Main] mode is migrateTableData..."
-        enableMultiThread ${threadTask}
-        generateHiveTablePath
+        # enableMultiThread ${threadTask}
+        # generateHiveTablePath
         # TODO
+        enableMultiThread ${threadTask}
         migrateHiveData
         # TODO
         msckRepairHiveData

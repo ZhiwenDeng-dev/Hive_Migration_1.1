@@ -74,7 +74,6 @@ splitLine(){
     checkParameterIsEmpty ${sourceTable}
     checkParameterIsEmpty ${targetDB}
     checkParameterIsEmpty ${targetTable}
-    checkParameterIsEmpty ${hiveQuerySqlFile}
 }
 
 checkTableExistPartition(){
@@ -90,17 +89,21 @@ checkTableExistPartition(){
 }
 
 checkTableExistPartitionAndAppendfile(){
-    checkDB="$1.db"
+    checkDB="$1"
     checkTable=$2
     escapeSourceDistcpHiveRPCAddress=$3
     escapeSourceHiveHdfsPath=$4
+    escapeTargetDistcpHiveRPCAddress=$5
+    escapeTargetHiveHdfsPath=$6
     hive --config ${sourceHiveConfigPath} -e "show  partitions ${checkDB}.${checkTable};" >/dev/null 2>&1
+    # for test 测试
     if [ $? -ne 0 ];then
-      echo -e "${sourceDistcpHiveRPCAddress}/${sourceHiveHdfsPath}/${checkDB}/${checkTable}" > ${partitionInfoDir}/${checkDB}.${checkTable}
+      echo -e "${sourceDistcpHiveRPCAddress}${sourceHiveHdfsPath}/${checkDB}.db/${checkTable},${targetDistcpHiveRPCAddress}${targetHiveHdfsPath}/${checkDB}.db/${checkTable}" > ${partitionInfoDir}/${checkDB}.${checkTable}
       return 1
     else
       hive --config ${sourceHiveConfigPath} -e "show  partitions ${checkDB}.${checkTable};" 1>${partitionInfoDir}/${checkDB}.${checkTable} 2>/dev/null
-      sed -i "s/^/${escapeSourceDistcpHiveRPCAddress}${escapeSourceHiveHdfsPath}\/${checkDB}\/${checkTable}\//g" ${partitionInfoDir}/${checkDB}.${checkTable}
+    #   sed -i "s/^/${escapeSourceDistcpHiveRPCAddress}${escapeSourceHiveHdfsPath}\/${checkDB}.db\/${checkTable}\//g" ${partitionInfoDir}/${checkDB}.${checkTable}
+      sed -i "s/\(.*\)/${escapeSourceDistcpHiveRPCAddress}${escapeSourceHiveHdfsPath}\/${checkDB}.db\/${checkTable}\/\1,${escapeTargetDistcpHiveRPCAddress}${escapeTargetHiveHdfsPath}\/${checkDB}.db\/${checkTable}\/\1/g" ${partitionInfoDir}/${checkDB}.${checkTable}
       return 0
     fi    
 }
@@ -158,8 +161,10 @@ generateHiveTablePath(){
             # "s/^/\/test\//g"
             escapeSourceDistcpHiveRPCAddress=${sourceDistcpHiveRPCAddress//\//\\\/}
             escapeSourceHiveHdfsPath=${sourceHiveHdfsPath//\//\\\/}
+            escapeTargetDistcpHiveRPCAddress=${targetDistcpHiveRPCAddress//\//\\\/}
+            escapeTargetHiveHdfsPath=${targetHiveHdfsPath//\//\\\/}
             info "[checkTableExistPartitionAndAppendfile-$count] start dealing with $sourceDB:$sourceTable"
-            checkTableExistPartitionAndAppendfile ${sourceDB} ${sourceTable} ${escapeSourceDistcpHiveRPCAddress} ${escapeSourceHiveHdfsPath}
+            checkTableExistPartitionAndAppendfile ${sourceDB} ${sourceTable} ${escapeSourceDistcpHiveRPCAddress} ${escapeSourceHiveHdfsPath} ${escapeTargetDistcpHiveRPCAddress} ${escapeTargetHiveHdfsPath}
             info "[checkTableExistPartitionAndAppendfile-$count] finish dealing with $sourceDB:$sourceTable"
             echo "" >&9
         
@@ -292,8 +297,71 @@ enableMultiThread(){
 }
 
 migrateHiveData(){
-    # TODO 遍历迁移的文件，取出 DB.TB 去hive 分区目录下拷贝对应表的path
-    echo -e "migrateHiveData"
+    # set distcp
+    DEFAULT_MAPS=5
+    DEFAULT_Bandwidth=20
+    distcpMaps=${distcpMaps:-$DEFAULT_MAPS}
+    distcpBandwidth=${distcpBandwidth:-$DEFAULT_Bandwidth}
+    (expr $distcpMaps + $distcpBandwidth &>/dev/null) && info "[migrateHiveData] distcpMaps set to $distcpMaps , distcpBandwidth set to $distcpBandwidth" || err_info "${LINENO} [migrateHiveData] Invalid parameter '\'$distcpMaps'\' or '\'$distcpBandwidth'\'"
+    # check
+    if [ ${distcpBandwidth} -ge 50 ];then
+        err_info "${LINENO} [migrateHiveData] The distcpBandwidth of applied threads is ${distcpBandwidth} greater than 50"
+        exit 1;
+    fi
+
+    if [ ${distcpMaps} -ge 100 ];then
+        err_info "${LINENO} [migrateHiveData] The distcpMaps of applied threads is ${distcpMaps} greater than 100"
+        exit 1;
+    fi
+# bug
+    for line in $(cat ${migrationTableFile});do
+        splitLine ${line}
+        # 测试
+        checkHdfsDirAndBackup "${targetDistcpHiveRPCAddress}${targetHiveHdfsPath}/${sourceDB}.db/${sourceTable}"
+        for tablePath in $(cat ${partitionInfoDir}/${sourceDB}.${sourceTable});do
+            (( count++ ))
+            read -u9
+            {
+                sourceHiveHdfsTablePath=$(echo $tablePath | cut -d "," -f1)
+                targetHiveHdfsTablePath=$(echo $tablePath | cut -d "," -f2)
+                info "[migrateHiveData-$count] start dealing with $sourceDB:$sourceTable distcp path is $sourceHiveHdfsTablePath to $targetHiveHdfsTablePath"
+                distcpHdfsFile ${sourceHiveHdfsTablePath} ${targetHiveHdfsTablePath}
+                info "[migrateHiveData-$count] finish dealing with $sourceDB:$sourceTable distcp path is $sourceHiveHdfsTablePath to $targetHiveHdfsTablePath"
+                echo "" >&9
+            }&
+        done
+    done
+    wait
+    # close the pipe
+    exec 9>&-
+
+}
+
+checkHdfsDirAndBackup(){
+    backDate=$(date "+%Y-%m-%d_%H_%M_%S")
+    backName="$1.${backDate}.$(whoami).bak"
+    $HADOOP_HOME/bin/hdfs dfs -test -d $1
+    if [ $? -eq 0 ];then
+        info "$1 The directory already exists. "
+        $HADOOP_HOME/bin/hdfs dfs -mv $1 "${backName}"
+        [ $? -ne 0 ] && info "[checkHdfsDirAndBackup] $1 backup success,bakcup dir is ${backName}" || { err_info "${LINENO} [checkHdfsDirAndBackup] Unable backup $1.Please check"; exit 1; }
+    else
+        info "$1 The directory not exists continue distcp."
+    fi
+}
+
+distcpHdfsFile(){
+
+    if [ $# -eq 2 ];then
+        sourceHiveHdfsTablePath=$1
+        targetHiveHdfsTablePath=$2
+        [ -z ${sourceHiveHdfsTablePath} ] && { err_info "${LINENO} [distcpHdfsFile] The source hive hdfs path cannot be empty"; exit 1; }
+        [ -z ${targetHiveHdfsTablePath} ] && { err_info "${LINENO} [distcpHdfsFile] The target hive hdfs path cannot be empty"; exit 1; }
+        hadoop distcp -Dmapreduce.job.name="distcp ${sourceDB}:${sourceTable}" -pugpb -m "$distcpMaps" -bandwidth "$distcpBandwidth" -overwrite ${sourceHiveHdfsTablePath}  ${targetHiveHdfsTablePath} >> "migration_logs/${sourceTable}_distcp.log" 2>&1
+   else
+      err_info "${LINENO} [distcpHdfsFile] Invalid parameter '\'$1'\'" && exit 1;
+   fi
+
 }
 
 msckRepairHiveData(){
