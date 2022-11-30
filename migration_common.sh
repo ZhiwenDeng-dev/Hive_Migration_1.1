@@ -313,11 +313,12 @@ migrateHiveData(){
         err_info "${LINENO} [migrateHiveData] The distcpMaps of applied threads is ${distcpMaps} greater than 100"
         exit 1;
     fi
-# bug
+
     for line in $(cat ${migrationTableFile});do
         splitLine ${line}
         # 测试
         checkHdfsDirAndBackup "${targetDistcpHiveRPCAddress}${targetHiveHdfsPath}/${sourceDB}.db/${sourceTable}"
+        count=0
         for tablePath in $(cat ${partitionInfoDir}/${sourceDB}.${sourceTable});do
             (( count++ ))
             read -u9
@@ -330,21 +331,22 @@ migrateHiveData(){
                 echo "" >&9
             }&
         done
+        #wait命令的意思是，等待（wait命令）上面的命令（放入后台的）都执行完毕了再往下执行。
+        wait
     done
-    wait
     # close the pipe
-    exec 9>&-
+    exec 9>&- 
 
 }
 
 checkHdfsDirAndBackup(){
-    backDate=$(date "+%Y-%m-%d_%H_%M_%S")
+    backDate=$(date "+%Y-%m-%d_%Hhr_%Mmi_%Sse")
     backName="$1.${backDate}.$(whoami).bak"
-    $HADOOP_HOME/bin/hdfs dfs -test -d $1
+    $HADOOP_HOME/bin/hdfs dfs -test -d $1 > /dev/null 2>&1
     if [ $? -eq 0 ];then
         info "$1 The directory already exists. "
-        $HADOOP_HOME/bin/hdfs dfs -mv $1 "${backName}"
-        [ $? -ne 0 ] && info "[checkHdfsDirAndBackup] $1 backup success,bakcup dir is ${backName}" || { err_info "${LINENO} [checkHdfsDirAndBackup] Unable backup $1.Please check"; exit 1; }
+        $HADOOP_HOME/bin/hdfs dfs -mv $1 ${backName} > /dev/null 2>&1
+        [ $? -eq 0 ] && info "[checkHdfsDirAndBackup] $1 backup success,bakcup dir is ${backName}" || { err_info "${LINENO} [checkHdfsDirAndBackup] Unable to $1 backup ${backName}.Please check"; exit 1; }
     else
         info "$1 The directory not exists continue distcp."
     fi
