@@ -9,7 +9,7 @@ export migrationTableFile=table.txt
 
 export autoCreateTableFile=Y
 export sourceDatabase=tpcds_bin_partitioned_orc_10
-export targetDatabase=tpcds_bin_partitioned_orc_10
+export targetDatabase=test
 
 
 # [ createTableSql ]

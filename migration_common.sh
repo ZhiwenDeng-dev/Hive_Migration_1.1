@@ -59,6 +59,7 @@ generateTableFile(){
     info "start generate table file please wait..."
     hive --config ${sourceHiveConfigPath} -e "use ${sourceDatabase}; show tables;" 1>${migrationTableFile} 2>/dev/null
     [ $? -ne 0 ] && { err_info "${LINENO} [generateTableFile] Unable to generate table file. Please check ";exit 1;  }
+
     sed -i "s/\(.*\)/${sourceDatabase},\1,${targetDatabase},\1/g" ${migrationTableFile}
 
     info "generate table file successed,table file is ${migrationTableFile}"
@@ -89,21 +90,22 @@ checkTableExistPartition(){
 }
 
 checkTableExistPartitionAndAppendfile(){
-    checkDB="$1"
+    checkDB=$1
     checkTable=$2
     escapeSourceDistcpHiveRPCAddress=$3
     escapeSourceHiveHdfsPath=$4
     escapeTargetDistcpHiveRPCAddress=$5
     escapeTargetHiveHdfsPath=$6
+    targetDB=$7
+    targetTable=$8
     hive --config ${sourceHiveConfigPath} -e "show  partitions ${checkDB}.${checkTable};" >/dev/null 2>&1
     # for test 测试
     if [ $? -ne 0 ];then
-      echo -e "${sourceDistcpHiveRPCAddress}${sourceHiveHdfsPath}/${checkDB}.db/${checkTable},${targetDistcpHiveRPCAddress}${targetHiveHdfsPath}/${checkDB}.db/${checkTable}" > ${partitionInfoDir}/${checkDB}.${checkTable}
+      echo -e "${sourceDistcpHiveRPCAddress}${sourceHiveHdfsPath}/${checkDB}.db/${checkTable},${targetDistcpHiveRPCAddress}${targetHiveHdfsPath}/${targetDB}/${targetTable}" > ${partitionInfoDir}/${checkDB}.${checkTable}
       return 1
     else
       hive --config ${sourceHiveConfigPath} -e "show  partitions ${checkDB}.${checkTable};" 1>${partitionInfoDir}/${checkDB}.${checkTable} 2>/dev/null
-    #   sed -i "s/^/${escapeSourceDistcpHiveRPCAddress}${escapeSourceHiveHdfsPath}\/${checkDB}.db\/${checkTable}\//g" ${partitionInfoDir}/${checkDB}.${checkTable}
-      sed -i "s/\(.*\)/${escapeSourceDistcpHiveRPCAddress}${escapeSourceHiveHdfsPath}\/${checkDB}.db\/${checkTable}\/\1,${escapeTargetDistcpHiveRPCAddress}${escapeTargetHiveHdfsPath}\/${checkDB}.db\/${checkTable}\/\1/g" ${partitionInfoDir}/${checkDB}.${checkTable}
+      sed -i "s/\(.*\)/${escapeSourceDistcpHiveRPCAddress}${escapeSourceHiveHdfsPath}\/${checkDB}.db\/${checkTable}\/\1,${escapeTargetDistcpHiveRPCAddress}${escapeTargetHiveHdfsPath}\/${targetDB}\/${targetTable}\/\1/g" ${partitionInfoDir}/${checkDB}.${checkTable}
       return 0
     fi    
 }
@@ -164,7 +166,7 @@ generateHiveTablePath(){
             escapeTargetDistcpHiveRPCAddress=${targetDistcpHiveRPCAddress//\//\\\/}
             escapeTargetHiveHdfsPath=${targetHiveHdfsPath//\//\\\/}
             info "[checkTableExistPartitionAndAppendfile-$count] start dealing with $sourceDB:$sourceTable"
-            checkTableExistPartitionAndAppendfile ${sourceDB} ${sourceTable} ${escapeSourceDistcpHiveRPCAddress} ${escapeSourceHiveHdfsPath} ${escapeTargetDistcpHiveRPCAddress} ${escapeTargetHiveHdfsPath}
+            checkTableExistPartitionAndAppendfile ${sourceDB} ${sourceTable} ${escapeSourceDistcpHiveRPCAddress} ${escapeSourceHiveHdfsPath} ${escapeTargetDistcpHiveRPCAddress} ${escapeTargetHiveHdfsPath} ${targetDB} ${targetTable}
             info "[checkTableExistPartitionAndAppendfile-$count] finish dealing with $sourceDB:$sourceTable"
             echo "" >&9
         
@@ -317,7 +319,7 @@ migrateHiveData(){
     for line in $(cat ${migrationTableFile});do
         splitLine ${line}
         # 测试
-        checkHdfsDirAndBackup "${targetDistcpHiveRPCAddress}${targetHiveHdfsPath}/${sourceDB}.db/${sourceTable}"
+        checkHdfsDirAndBackup "${targetDistcpHiveRPCAddress}${targetHiveHdfsPath}/${targetDB}/${targetTable}"
         count=0
         for tablePath in $(cat ${partitionInfoDir}/${sourceDB}.${sourceTable});do
             (( count++ ))
@@ -327,6 +329,7 @@ migrateHiveData(){
                 targetHiveHdfsTablePath=$(echo $tablePath | cut -d "," -f2)
                 info "[migrateHiveData-$count] start dealing with $sourceDB:$sourceTable distcp path is $sourceHiveHdfsTablePath to $targetHiveHdfsTablePath"
                 distcpHdfsFile ${sourceHiveHdfsTablePath} ${targetHiveHdfsTablePath}
+                checkDistcpResult ${sourceHiveHdfsTablePath} ${targetHiveHdfsTablePath}
                 info "[migrateHiveData-$count] finish dealing with $sourceDB:$sourceTable distcp path is $sourceHiveHdfsTablePath to $targetHiveHdfsTablePath"
                 echo "" >&9
             }&
@@ -337,6 +340,17 @@ migrateHiveData(){
     # close the pipe
     exec 9>&- 
 
+}
+
+checkDistcpResult(){
+   targetSize=$($HADOOP_HOME/bin/hadoop fs -count $1 2>/dev/null | awk '{print $3}')
+   sourceSize=$($HADOOP_HOME/bin/hadoop fs -count $2 2>/dev/null | awk '{print $3}')
+   if [ "$targetSize" -eq "$sourceSize" ];then
+      info "[checkDistcpResult] Distcp is complete. Data verification is successful"
+   else
+      err_info "${LINENO} [checkDistcpResult] The result of the target cluster $1 is inconsistent with that of the copy cluster $2";
+      exit 1;
+   fi
 }
 
 checkHdfsDirAndBackup(){
@@ -359,7 +373,7 @@ distcpHdfsFile(){
         targetHiveHdfsTablePath=$2
         [ -z ${sourceHiveHdfsTablePath} ] && { err_info "${LINENO} [distcpHdfsFile] The source hive hdfs path cannot be empty"; exit 1; }
         [ -z ${targetHiveHdfsTablePath} ] && { err_info "${LINENO} [distcpHdfsFile] The target hive hdfs path cannot be empty"; exit 1; }
-        hadoop distcp -Dmapreduce.job.name="distcp ${sourceDB}:${sourceTable}" -pugpb -m "$distcpMaps" -bandwidth "$distcpBandwidth" -overwrite ${sourceHiveHdfsTablePath}  ${targetHiveHdfsTablePath} >> "migration_logs/${sourceTable}_distcp.log" 2>&1
+        hadoop distcp -Dmapreduce.job.name="hive migration ${sourceDB}:${sourceTable}" -pugpb -m "$distcpMaps" -bandwidth "$distcpBandwidth" -overwrite ${sourceHiveHdfsTablePath}  ${targetHiveHdfsTablePath} >> "migration_logs/${sourceTable}_distcp.log" 2>&1
    else
       err_info "${LINENO} [distcpHdfsFile] Invalid parameter '\'$1'\'" && exit 1;
    fi
@@ -367,56 +381,12 @@ distcpHdfsFile(){
 }
 
 msckRepairHiveData(){
+    for line in $(cat ${migrationTableFile});do
+        splitLine ${line}
+        info "[msckRepairHiveData] start msck repair hive table ${targetDB}:${targetTable}"
+        hive --config ${targetHiveConfigPath} -e "MSCK REPAIR TABLE ${targetDB}.${targetTable};" >/dev/null 2>&1
+        [ $? -eq 0 ] && info "[msckRepairHiveData] msck repair hive table ${targetDB}:${targetTable} success." || { err_info "${LINENO} [msckRepairHiveData] Unable to msck repair hive table ${targetDB}:${targetTable}.Please check"; exit 1; }
+    done
     # 执行 msck repair 修复table
     echo -e "msckRepairHiveData"
-}
-
-startMultiThread(){
-   case $1 in
-      "verify")
-         count=0
-         for line in $(cat ${migrationTableFile});do
-            (( count++ ))
-            read -u9
-            {
-               verifyModeStatus=$2
-               info "[Thread-$count] start query with ${verifyModeStatus} ${sourceDB}:${sourceTable}"
-            #    queryHiveTable ${verifyModeStatus} ${sourceDB} ${sourceTable}
-               info "[Thread-$count] finish query with ${verifyModeStatus} ${sourceDB}:${sourceTable}"
-
-               info "[Thread-$count] start query with ${verifyModeStatus} ${targetDB}:${targetTable}"
-            #    queryHiveTable ${verifyModeStatus} ${sourceDB} ${sourceTable}
-               info "[Thread-$count] finish query with ${verifyModeStatus} ${targetDB}:${targetTable}"
-               echo "" >&9
-            }&
-         done
-         wait
-         # close the pipe
-         exec 9>&-
-         ;;
-      "migrate")
-         count=0
-         for line in $(cat ${migrationTableFile});do
-            (( count++ ))
-            read -u9
-            {
-               sourceTable=$(echo $line | cut -d "," -f1)
-               targetTable=$(echo $line | cut -d "," -f2)
-               sourceTable_snapshot="${sourceTable}_snapshot"
-               targetTable_snapshot="${targetTable}_snapshot"
-               checkParameterIsEmpty ${sourceTable}
-               checkParameterIsEmpty ${targetTable}
-               info "[startMultiThread-$count] start dealing snapshot with ${sourceTable_snapshot} to ${targetTable_snapshot}"
-               snapshotHbaseTable "${sourceTable_snapshot}" "${targetTable_snapshot}"
-               info "[startMultiThread-$count] finish dealing snapshot with ${sourceTable_snapshot} to ${targetTable_snapshot}"
-               echo "" >&9
-            }&
-         done
-         wait
-         # close the pipe
-         exec 9>&-
-         ;;
-      *)
-         err_info "${LINENO} [startMultiThread] Invalid parameter '\'$1'\'" && exit 1;
-   esac
 }
