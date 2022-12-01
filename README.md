@@ -1,5 +1,9 @@
 # Hive_Migration_1.1
 migration hive data
+```bash
+# use simple demo
+bash migration_hive.sh migrate
+```
 
 - step.1 Generate table creation statement based on table file
 

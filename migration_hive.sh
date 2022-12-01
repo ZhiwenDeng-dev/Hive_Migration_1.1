@@ -62,7 +62,7 @@ fi
 # verify migrate all
 case $mode in
     # 导出建表语句
-    "exportCreateTableSql" | "crate")
+    "exportCreateTableSql" | "create")
         info "[Main] mode is export create table sql..."
         enableMultiThread ${threadTask}
         generateCreateHiveTable
